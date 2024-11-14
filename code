@@ -1,1 +1,130 @@
+import pandas as pd
+import requests
+import os
 
+# Flatten the multi-level column headers
+def flatten_column(col):
+    # Filter out any levels that are 'Unnamed' or None
+    return '_'.join([str(c) for c in col if 'Unnamed' not in str(c) and c is not None])
+
+
+# Function to load mapping from the mapping Excel file
+def load_mapping(file_path):
+    df_mapping = pd.read_excel(file_path, sheet_name='data', engine='openpyxl')
+    mapping_dict = {}
+
+    # Iterate through each row to create a dictionary for mappings
+    for _, row in df_mapping.iterrows():
+        header = row['dvdmt_headers']
+        data_element = row['dataElement_dhis2_uid']
+        category_option_combo = row['categoryOptionCombo_dhis2_uid']
+        mapping_dict[header] = {
+            "dataElement": data_element,
+            "categoryOptionCombo": category_option_combo
+        }
+
+    return mapping_dict
+
+
+# Function to read and prepare data from Excel file
+def read_dvd_mt_data(file_path, mapping_dict):
+    # Load the Excel file, specifying multiple header rows
+    df = pd.read_excel(file_path, header=[0, 1, 2, 3], sheet_name='data', engine='openpyxl')
+    df.columns = [flatten_column(col) for col in df.columns]
+
+    # # print the columns of the DataFrame
+    # for col in df.columns:
+    #     print(col)
+
+    # Ensure all columns in the mapping are available
+    missing_columns = [col for col in mapping_dict if col not in df.columns]
+    if missing_columns:
+        print(f"Warning: The following columns are missing in the Excel file: {missing_columns}")
+
+    # Transform the data into DHIS2-compatible format and send
+    transform_and_send_data(df, mapping_dict)
+
+
+# Function to transform DataFrame to DHIS2-compatible format and send data
+def transform_and_send_data(df, mapping_dict):
+    counter = 1
+    for _, row in df.iterrows():
+        period_timestamp = row['Rapports mensuels']
+        period_str = period_timestamp.strftime('%Y%m')
+
+        # Initialize the main data object for each row
+        data = {
+            "dataSet": "D7G7EWInlIv",
+            "completeDate": '',
+            "period": period_str,
+            "orgUnit": "" if pd.isna(row['dhis2_orgunit_uids']) else row['dhis2_orgunit_uids'],   #'JKVlAGQmPz2',
+            "dataValues": []
+        }
+
+        # Populate the dataValues
+        for column, mapping in mapping_dict.items():
+            if column in df.columns and pd.notna(row[column]):
+                data_value = {
+                    "dataElement": mapping['dataElement'],
+                    "period": period_str,
+                    "categoryOptionCombo": mapping['categoryOptionCombo'],
+                    "comment": "no comment",
+                    "value": "" if pd.isna(row[column]) or row[column] == 0.00 or isinstance(row[column], str) else int(float(row[column]))
+                }
+                data['dataValues'].append(data_value)
+
+            # Send the data to DHIS2 and log the result
+        if send_to_dhis2(data):
+            counter = counter + 1
+            print('{}: Data imported successfully for OU: {} for period: {}'.format(counter, row['dhis2_orgunit_uids'], period_str))
+        else:
+            save_failed_row(row)
+
+
+# Function to send data to DHIS2
+def send_to_dhis2(data):
+    url = "https://dhis2comores.org/dvdmt/api/dataValueSets"
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': '',
+        'Cookie': ''
+    }
+
+    # Make the POST request to DHIS2
+    response = requests.request("POST", url, headers=headers, json=data)
+
+    if response.status_code == 200:
+        return True
+    else:
+        print(f"Failed to send data: {response.status_code}")
+        return False
+
+
+# Function to save the failed row to a CSV file
+def save_failed_row(row, file_name="failed_imports.csv"):
+    # Convert row to a DataFrame to save it easily
+    row_df = pd.DataFrame([row])
+
+    # Append the failed row to the CSV file
+    try:
+        if not os.path.isfile(file_name):
+            row_df.to_csv(file_name, index=False, mode='w')
+        else:
+            row_df.to_csv(file_name, index=False, mode='a', header=False)
+        print(f"Saved failed row for OU: {row['dhis2_orgunit_uids']} to {file_name}")
+    except Exception as e:
+        print(f"Error saving failed row to file: {e}")
+
+
+# Main function
+if __name__ == "__main__":
+    # Construct the absolute path to the mapping file
+    script_dir = os.path.dirname(__file__)
+    mapping_file_path = os.path.join(script_dir, "mapping_file.xlsx")
+
+    # Load the mapping dictionary from the mapping file
+    mapping_dict = load_mapping(mapping_file_path)
+
+    # Load and send the vaccination data
+    data_file_path = os.path.join(script_dir, "DVD-MT 2020.xlsx")
+    read_dvd_mt_data(data_file_path, mapping_dict)
